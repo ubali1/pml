@@ -1,0 +1,249 @@
+---
+title: "Prediction Assignment - Practical Machine Learning"
+author: "Utsav Bali"
+date: "14 August 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+## Objective
+
+In this project, our goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants and predict the manner in which they did the exercise. This is the "classe" variable in the training set. We may use any of the other variables to predict with. Participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways.The details are available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+## Data source
+
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. 
+
+## Load packages
+Loading the required packages for downstream analysis...
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(AppliedPredictiveModeling)
+library(caret)
+library(rattle)
+library(rpart.plot)
+library(randomForest)
+```
+
+##Loading data
+
+We shall load the data as follows:
+
+```{r}
+# set working director
+setwd("~/datasciencecoursera/Programming_Assignment/Practical_Machine_Learning/Project")
+
+# download files
+if (!file.exists("pml-training.csv")) {
+        download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "pml-training.csv")
+}
+if (!file.exists("pml-testing.csv")) {
+        download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "pml-testing.csv")
+}
+```
+
+Let's read the files...
+
+```{r}
+# label the files as pmltest and pmltrain sets respectively
+pmltest <- read.csv("pml-testing.csv", sep = ",", na.strings = c("", "NA"))
+pmltrain <- read.csv("pml-training.csv", sep = ",", na.strings = c("", "NA"))
+```
+
+Let's combine the two datasets and have a quick look at the structure
+
+```{r}
+# we use the 'bind_rows' function here instead of the 'rbind' function in case there are any missing variables between the dataset 
+complete_dataset <- bind_rows(pmltest, pmltrain)
+ # check data
+str(complete_dataset)
+```
+
+It is apparent that there are a number of variables with missing values in the dataset which will be removed prior to model construction
+
+## Data partitioning
+
+The pmltrain data set shall be split into a training and test partition. Cross validation shall be performed with the 'train' partition and out of sample test shall be performed with the 'test' partition.
+
+```{r}
+set.seed(12345)
+train_partition <- createDataPartition(y = pmltrain$classe, p = 0.7, list = FALSE)
+train <- pmltrain[train_partition, ]
+test <- pmltrain[-train_partition, ]
+```
+
+Let's have a quick look at the data dimensions:
+
+```{r}
+rbind("train dataset" = dim(train), "test dataset" = dim(test))
+```
+
+## Data cleanup
+As we have seen previously, there are a number of variables in the dataset that contain 'NA' values such that we do not wish to preprocess the data using 'k nearest neighbors (knn) imputation. Our first order of business is to identify the features (variables) in the data set that contain NAs, near zero variates and subject identifiers that are not required for model building.
+
+```{r}
+# remove variables that contain greater than 95% NA values
+NA_values <- sapply(train, function(x) mean(is.na(x))) > 0.95
+# how many columns contain greater than 95% NA values
+length(which(NA_values == TRUE))
+
+# filter the dataset to exclude column headers containing > 95% NAs
+train <- train[, NA_values == F]
+test <- test[, NA_values == F]
+rbind("train dataset" = dim(train), "test dataset" = dim(test))
+```
+
+We have now eliminated 100 columns from this data set with only 60 remaining to build a model from. We shall now attempt to remove variable that contain limited variability within them. 
+
+```{r}
+# remove variables with nearly zero variance
+nzv_values <- nearZeroVar(train)
+train <- train[, -nzv_values]
+test <- test[, -nzv_values]
+rbind("train dataset" = dim(train), "test dataset" = dim(test))
+# we have also removed column 6 as a result of this operation
+```
+
+Let's now remove columns (variables) that are identifiers and will not be required for building our model. These would include the first five columns (X, user_name, raw_timestamp_part_1, raw_timestamp_part2, cvtd_timestamp). 
+
+```{r}
+# remove columns 1-5
+train <- train[, -(1:5)]
+test <- test[, -(1:5)]
+rbind("train dataset" = dim(train), "test dataset" = dim(test))
+```
+
+In addition, to the now 54 columns, we can further exclude variables that are highly correlated.
+
+```{r}
+# identify the `classe` column index
+classe_index <- which(names(train) == "classe")
+
+# find correlation between all columns except the 'classe' variable and output index for all correlations > 90
+correlation_index <- findCorrelation(abs(cor(train[,-classe_index])),0.90)
+
+# names of columns with high correlation
+correlation_names <- names(train)[correlation_index]
+```
+
+These are the columns that are highly correlated: 
+```{r}
+correlation_names
+```
+
+Let's further refine the train and the test partitions with the highly correlated columns removed.
+
+```{r}
+train <- train[,-correlation_index]
+test <- test[, -correlation_index]
+rbind("train dataset" = dim(train), "test dataset" = dim(test))
+classe_index <- which(names(train) == "classe")
+```
+
+## Feature importance using random forest
+
+We have now further removed 7 variables from this dataset. Let's now use random forest to identify the most important features
+
+```{r}
+# we'll set the argument 'importance = T'
+rf_imp <- randomForest(train[, -classe_index], train[, classe_index], importance = T)
+
+varImpPlot(rf_imp)
+# the plots show how much a decrease in accuracy would be expected if we remove each of the predictors and the second plot shows the same for Gini index
+
+# let's show the table containing feature importance
+# varImp(rf_imp)
+rf_imp$importance
+```
+
+## Model building
+
+We shall attempt to examine the cleaned data set using three algorithms and evaluate their 'out of sample' accuracy to find the best model. We'll fit the model with - 
+* Decision trees with CART (rpart)
+* Stochastic gradient boosting trees(gbm) and 
+* Random forest decision trees (rf)
+
+First to fit the data to CART - 
+
+```{r}
+#  method 'cv' in the train function in the caret package breaks the data set train into k-folds (defaulted), 
+# and then starts over and runs it 3 times
+cross_validation <- trainControl(method = "cv", number=3, repeats=3)
+
+cart_model <- train(classe ~ ., data = train, trControl = cross_validation, method = 'rpart')
+
+#plot the decision tree using rattle package
+fancyRpartPlot(cart_model$finalModel,cex=.5,under.cex=1,shadow.offset=0)
+```
+
+Next we'll fit the data to Stochastic Gradient Boosting (gbm) - 
+
+```{r}
+gbm_model <- train(classe ~ ., data = train, trControl = cross_validation, method='gbm')
+```
+
+And also fit to random forest - 
+
+```{r}
+rf_model <- train(classe ~., data = train, trControl = cross_validation, method = 'rf', ntree = 100)
+# List of 20 most important variables
+varImp(rf_model)
+```
+
+## Prediction with test data and calculation of Out Of Sample error
+
+```{r}
+# prediction of test data using 'cart_model'
+CART_prediction <- predict(cart_model, newdata = test)
+CART_confusion_matrix <- confusionMatrix(CART_prediction, test$classe)
+
+# prediction of test data using 'gbm_model'
+GBM_prediction <- predict(gbm_model, newdata = test)
+GBM_confusion_matrix <- confusionMatrix(GBM_prediction, test$classe)
+
+# prediction of test data using 'rf_model'
+RF_prediction <- predict(rf_model, newdata = test)
+RF_confusion_matrix <- confusionMatrix(RF_prediction, test$classe)
+
+# report accuracy from each model on the test data
+model_accuracy <- data.frame(Model = c('CART', 'GBM', 'RF'), Accuracy = rbind(CART_confusion_matrix$overall[1], GBM_confusion_matrix$overall[1], RF_confusion_matrix$overall[1]))
+print(model_accuracy)
+```
+
+The above analysis using the 3 model fits shows that both the gbm and the rf are better than the CART model. The random forest model is the most accurate with the following confusion matrix - 
+
+```{r}
+RF_confusion_matrix
+# varImp(rf_model)
+```
+
+## Prediction
+
+Due to the high accuracy observed with the rf model, we shall use this model to predict the data in the 'pml-testing.csv' file to predict a classe for each of the 20 observations.
+
+```{r}
+prediction <- predict(rf_model, newdata = pmltest)
+pml_test_results <- data.frame(problem_id = pmltest$problem_id, predicted = prediction)
+```
+
+## Conclusion
+
+The random forest model with cross-validation fits the test data with a high degree of accuracy (99.68%); an out of sample error of 0.32%. There was no need to create a combined fit model due to the high accuracy of the rf model. Based on the model, the following predictions on the test data set are available: 
+
+```{r}
+print(pml_test_results)
+```
+
